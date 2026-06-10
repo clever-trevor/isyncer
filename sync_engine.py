@@ -392,6 +392,34 @@ def _get_isyncr_play_counts(serial, android_root):
     return counts
 
 
+def _trigger_media_scan(serial, android_root):
+    """Ask Android's MediaStore to rescan the sync directory.
+
+    Tries the Android 10+ content-provider method first, then the legacy
+    MEDIA_MOUNTED broadcast as a fallback.  Both calls are best-effort —
+    failures are silently ignored.
+    """
+    adb = _find_adb()
+    if not adb:
+        return
+    # Android 10+ — scan the external volume via the media content provider
+    _run_adb_command(
+        _adb_command(adb, serial) + [
+            "shell",
+            "content call --method scan_volume --uri content://media --arg external",
+        ],
+        check=False,
+    )
+    # Legacy fallback (Android < 8) — broadcast MEDIA_MOUNTED for /sdcard
+    _run_adb_command(
+        _adb_command(adb, serial) + [
+            "shell",
+            "am broadcast -a android.intent.action.MEDIA_MOUNTED -d file:///sdcard --receiver-foreground",
+        ],
+        check=False,
+    )
+
+
 def _reset_isyncr_xml(serial, android_root):
     """Overwrite isyncr.xml with an empty library to reset play counts."""
     adb = _find_adb()
@@ -728,6 +756,7 @@ def execute_plan(plan, test_mode=False, serial=None, progress_callback=None):
     android_root = plan.get("summary", {}).get("android_root", "")
     if android_root and _looks_like_android_device_path(android_root):
         _reset_isyncr_xml(serial, android_root)
+        _trigger_media_scan(serial, android_root)
 
     return {
         "copied": copied,
