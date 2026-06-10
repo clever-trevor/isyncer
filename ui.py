@@ -398,6 +398,7 @@ class SyncApp:
             summary_lines.append(f"Executed copies: {execution['copied']}")
             summary_lines.append(f"Executed removals: {execution['removed']}")
             summary_lines.append(f"M3U files pushed: {execution['playlists_pushed']}")
+            summary_lines.append(f"iTunes play counts updated: {execution['play_counts_updated']}")
 
             if plan.get("remove"):
                 summary_lines.append(f"\nRemoval actions ({len(plan['remove'])}):")
@@ -405,10 +406,11 @@ class SyncApp:
                     summary_lines.append(f" - {item['path']}")
 
         if plan.get("play_count_updates"):
-            summary_lines.append("\nPlay-count updates detected:")
+            verb = "to update" if bool(self.test_mode.get()) else "updated"
+            summary_lines.append(f"\nPlay counts {verb} in iTunes ({len(plan['play_count_updates'])}):")
             for item in plan["play_count_updates"]:
                 summary_lines.append(
-                    f" - {item['name']}: Android {item['android_play_count']}, iTunes {item['itunes_play_count']}"
+                    f" - {item['name']}: {item['itunes_play_count']} + {item['android_play_count']} = {item['new_count']}"
                 )
 
         self.summary_box.delete("1.0", tk.END)

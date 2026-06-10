@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -327,6 +329,125 @@ def _android_rel_keys(path, norm_android_root):
     return frozenset()
 
 
+def _get_android_play_counts(serial=None):
+    """Bulk-query Android MediaStore for audio play counts.
+
+    Returns {filename_lower: play_count} for every file where play_count > 0.
+    Requires Android 10+ for the play_count column; returns {} on older devices.
+    """
+    adb = _find_adb()
+    if not adb:
+        return {}
+    command = _adb_command(adb, serial) + [
+        "shell",
+        "content query --uri content://media/external/audio/media --projection _display_name:play_count",
+    ]
+    result = _run_adb_command(command, check=False)
+    if not result:
+        return {}
+    counts = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("Row:"):
+            continue
+        pc_match = re.search(r",\s*play_count=(\d+)", line)
+        if not pc_match or pc_match.group(1) == "0":
+            continue
+        name_match = re.search(r"_display_name=(.+?),\s*play_count=", line)
+        if name_match:
+            counts[name_match.group(1).strip().lower()] = int(pc_match.group(1))
+    return counts
+
+
+def _get_isyncr_play_counts(serial, android_root):
+    """Read play counts from isyncr.xml in the Android sync root.
+
+    Returns {(song_name_lower, artist_name_lower): play_count}.
+    """
+    adb = _find_adb()
+    if not adb:
+        return {}
+    xml_path = android_root.rstrip("/") + "/isyncr.xml"
+    command = _adb_command(adb, serial) + ["shell", f"cat '{xml_path}'"]
+    result = _run_adb_command(command, check=False)
+    if not result or not result.stdout.strip():
+        return {}
+    try:
+        root = ET.fromstring(result.stdout.strip())
+    except ET.ParseError:
+        return {}
+    counts = {}
+    for song in root.findall("song"):
+        pc = int(song.get("playcount", "0") or "0")
+        if pc <= 0:
+            continue
+        name = (song.get("songName") or "").lower()
+        artist = (song.get("artistName") or "").lower()
+        if name and artist:
+            counts[(name, artist)] = max(counts.get((name, artist), 0), pc)
+    return counts
+
+
+def _reset_isyncr_xml(serial, android_root):
+    """Overwrite isyncr.xml with an empty library to reset play counts."""
+    adb = _find_adb()
+    if not adb:
+        return False
+    empty_xml = "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n<library />\n"
+    fd, temp_path = tempfile.mkstemp(suffix=".xml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(empty_xml)
+        dest = android_root.rstrip("/") + "/isyncr.xml"
+        return _copy_file(temp_path, dest, serial=serial)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+
+def apply_play_count_updates(updates):
+    """Apply play count updates to iTunes via COM automation (Windows only).
+
+    Uses PowerShell to call the iTunes COM API — no extra Python packages needed.
+    Only updates a track if the Android count is still higher than the current
+    iTunes count (safe to call multiple times).
+    Returns the number of tracks actually updated.
+    """
+    if not updates or os.name != "nt":
+        return 0
+
+    entries = []
+    for item in updates:
+        ps_path = str(item["source"]).replace("'", "''")
+        entries.append(f"  '{ps_path}' = {item['new_count']}")
+
+    hashtable = "@{\n" + "\n".join(entries) + "\n}"
+    ps_script = f"""
+$updates = {hashtable}
+try {{ $iTunes = New-Object -ComObject iTunes.Application }}
+catch {{ Write-Output 0; exit 0 }}
+$tracks = $iTunes.LibraryPlaylist.Tracks
+$n = 0
+for ($i = 1; $i -le $tracks.Count; $i++) {{
+    $t = $tracks.Item($i)
+    if ($updates.ContainsKey($t.Location) -and $updates[$t.Location] -gt $t.PlayedCount) {{
+        $t.PlayedCount = $updates[$t.Location]
+        $n++
+    }}
+}}
+Write-Output $n
+"""
+    result = _run_powershell(ps_script)
+    if result and result.returncode == 0:
+        try:
+            return int(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return 0
+    return 0
+
+
 def _sanitize_filename(name):
     """Strip characters that are invalid in filenames."""
     for ch in r'\/:*?"<>|':
@@ -381,6 +502,13 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
         else:
             selected_names.add(_normalize_name(location or entry["song"].get("Name")))
 
+    android_play_counts = {}
+    isyncr_play_counts = {}
+    if _looks_like_android_device_path(android_root):
+        android_play_counts = _get_android_play_counts(serial)
+        if not android_play_counts:
+            isyncr_play_counts = _get_isyncr_play_counts(serial, android_root)
+
     copy_actions = []
     remove_actions = []
     play_count_updates = []
@@ -417,17 +545,29 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
                 "playlist": playlist_name,
                 "play_count": _track_value(song, "Play Count", "play_count") or 0,
             })
-        elif not test_mode:
-            sidecar = _read_play_count_sidecar(destination)
-            if sidecar and isinstance(sidecar, dict):
-                current_play_count = int(sidecar.get("play_count", 0) or 0)
-                library_play_count = int(_track_value(song, "Play Count", "play_count") or 0)
-                if current_play_count > library_play_count:
-                    play_count_updates.append({
-                        "name": song.get("Name", os.path.basename(source)),
-                        "android_play_count": current_play_count,
-                        "itunes_play_count": library_play_count,
-                    })
+        elif destination_exists and (android_play_counts or isyncr_play_counts):
+            from_isyncr = False
+            android_pc = android_play_counts.get(os.path.basename(source).lower(), 0)
+            if android_pc == 0 and isyncr_play_counts:
+                name_key = (_track_value(song, "Name", "name") or "").lower()
+                artist_key = (_track_value(song, "Artist", "artist") or "").lower()
+                android_pc = isyncr_play_counts.get((name_key, artist_key), 0)
+                from_isyncr = True
+            itunes_pc = int(_track_value(song, "Play Count", "play_count") or 0)
+            if from_isyncr:
+                new_count = itunes_pc + android_pc
+                should_update = android_pc > 0
+            else:
+                new_count = android_pc
+                should_update = android_pc > itunes_pc
+            if should_update:
+                play_count_updates.append({
+                    "name": _track_value(song, "Name", "name") or os.path.basename(source),
+                    "source": source,
+                    "android_play_count": android_pc,
+                    "itunes_play_count": itunes_pc,
+                    "new_count": new_count,
+                })
 
     for file_path in android_files:
         if _looks_like_android_device_path(android_root):
@@ -525,9 +665,16 @@ def execute_plan(plan, test_mode=False, serial=None):
             except OSError:
                 pass
 
+    play_counts_updated = apply_play_count_updates(plan.get("play_count_updates", []))
+
+    android_root = plan.get("summary", {}).get("android_root", "")
+    if android_root and _looks_like_android_device_path(android_root):
+        _reset_isyncr_xml(serial, android_root)
+
     return {
         "copied": copied,
         "removed": removed,
         "playlists_pushed": playlists_pushed,
+        "play_counts_updated": play_counts_updated,
         "preview": plan,
     }
