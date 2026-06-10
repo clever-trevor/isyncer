@@ -1,0 +1,7 @@
+claude.md
+.venv
+__pycache__
+.pytest_cache
+adb.exe
+AdbWinApi.dll
+isyncer_config.json
