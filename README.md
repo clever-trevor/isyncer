@@ -1,28 +1,47 @@
 # iSyncer
 
-This project is a Windows Python app for syncing selected iTunes playlists to an Android device.
+A Windows desktop app for syncing selected iTunes playlists to an Android device over USB.
 
-## Pre-Reqs
-1. Set up Developer Mode on your Android device, and enable USB debugging
-2. Install Python 3.12 or newer.
-3. Download the [SDK platform tools for Windows](https://developer.android.com/tools/releases/platform-tools) from Android site
-4. Extract these two files from the zip file into the directory where this code lives
-   - adb.exe
-   - AdbWinApi.dll
+## Pre-requisites
 
-## Run it
+1. **Android device** — enable Developer Mode and USB Debugging on the device.
+2. **Python 3.12+** — download from [python.org](https://www.python.org/downloads/).
+3. **ADB platform tools** — download the [SDK Platform Tools for Windows](https://developer.android.com/tools/releases/platform-tools) from the Android site, then extract these two files into the same folder as this code:
+   - `adb.exe`
+   - `AdbWinApi.dll`
 
-1. Double-click run_isyncer.cmd to launch the GUI.
-2. In the UI, set the iTunes XML file and the Android target folder (for example, the Music folder on your connected Android device). 
-3. Choose the playlists to sync.
-4. Select the Test Mode option to see what it will copy or delete on the Android device
-5. Once happy, untick Test Mode and Run Sync again
+## Setup
 
-## What is included
+Open a terminal in the project folder and run:
 
-- GUI for playlist selection and config updates
-- Reads the iTunes XML library file
-- Copies missing songs to the Android music root
-- Removes songs present on Android but not in the selected playlists
-- Test mode preview without copying or deleting files
-- Progress/summary information in the UI
+```cmd
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+```
+
+## Run
+
+Double-click **`run_isyncer.cmd`** to launch the app (no terminal window needed).
+
+## First-time configuration
+
+1. Set the **iTunes library** path (e.g. `E:\Music\iTunes\iTunes Music Library.xml`).
+2. Set the **Android folder** — click Browse to navigate the device directly, or type a path such as `/sdcard/Music`.
+3. Select which **playlists** to sync.
+4. Click **Save config** — settings are stored in `isyncer_config.json`.
+
+## Syncing
+
+1. Connect your Android device via USB and make sure it appears in the **ADB device** dropdown (click Refresh if needed).
+2. Tick **Test mode** and click **Run sync** to preview what will be copied or removed — no files are changed.
+3. Once happy, untick **Test mode** and click **Run sync** again to perform the actual sync.
+
+## Features
+
+- Copies songs in selected playlists that are missing from the device
+- Removes songs from the device that are no longer in any selected playlist
+- Generates and pushes `.m3u` playlist files to the device
+- Reads play counts from the device (`isyncr.xml`) and adds them back to iTunes
+- Resets `isyncr.xml` after a live sync so counts are not double-applied
+- Test mode preview without making any changes
+- Live progress and summary in the UI
