@@ -1,4 +1,6 @@
 import os
+import queue
+import threading
 import tkinter as tk
 from pathlib import PurePosixPath
 from tkinter import filedialog, messagebox
@@ -340,6 +342,9 @@ class SyncApp:
         if not serial and not os.path.exists(android_target):
             os.makedirs(android_target, exist_ok=True)
 
+        self.status_var.set("Building sync plan…")
+        self.root.update_idletasks()
+
         plan = build_sync_plan(
             selected_playlists=selected_playlists,
             android_root=android_target,
@@ -349,49 +354,158 @@ class SyncApp:
         )
 
         self.progress.set(0)
-        summary_lines = [
-            f"Mode      : {'TEST' if bool(self.test_mode.get()) else 'LIVE'}",
-            f"Playlists : {', '.join(item['name'] for item in selected_playlists)}",
+
+        if bool(self.test_mode.get()):
+            self._show_test_summary(plan, selected_playlists)
+        else:
+            self._run_live_sync(plan, serial, selected_playlists)
+
+    def _show_test_summary(self, plan, selected_playlists):
+        lines = [
+            f"Mode      : TEST",
+            f"Playlists : {', '.join(p['name'] for p in selected_playlists)}",
             f"To copy   : {plan['summary']['copies']}",
             f"To remove : {plan['summary']['removals']}",
             f"M3U files : {plan['summary']['playlists']}",
             f"Play count: {plan['summary']['play_count_updates']} updates",
+            "",
+            "Preview only — no files will be changed.",
         ]
 
-        if bool(self.test_mode.get()):
-            summary_lines.append("\nPreview only — no files will be changed.")
-            playlist_counts = {p["name"]: 0 for p in selected_playlists}
-            for item in plan.get("copy", []):
-                if item.get("playlist") in playlist_counts:
-                    playlist_counts[item["playlist"]] += 1
-            if playlist_counts:
-                summary_lines.append("\nFiles to copy by playlist:")
-                for name in sorted(playlist_counts):
-                    summary_lines.append(f"  {name}: {playlist_counts[name]}")
-            if plan.get("remove"):
-                summary_lines.append(f"\nFiles to remove ({len(plan['remove'])}):")
-                for item in plan["remove"]:
-                    summary_lines.append(f"  {item['path']}")
-        else:
-            execution = execute_plan(plan, test_mode=False, serial=serial)
-            summary_lines.append(f"\nCopied  : {execution['copied']}")
-            summary_lines.append(f"Removed : {execution['removed']}")
-            summary_lines.append(f"M3U     : {execution['playlists_pushed']} pushed")
-            summary_lines.append(f"iTunes  : {execution['play_counts_updated']} play counts updated")
-            if plan.get("remove"):
-                summary_lines.append(f"\nRemoved files ({len(plan['remove'])}):")
-                for item in plan["remove"]:
-                    summary_lines.append(f"  {item['path']}")
+        playlist_counts = {p["name"]: 0 for p in selected_playlists}
+        for item in plan.get("copy", []):
+            if item.get("playlist") in playlist_counts:
+                playlist_counts[item["playlist"]] += 1
+        if any(v for v in playlist_counts.values()):
+            lines.append("\nFiles to copy by playlist:")
+            for name in sorted(playlist_counts):
+                lines.append(f"  {name}: {playlist_counts[name]}")
+
+        if plan.get("remove"):
+            lines.append(f"\nFiles to remove ({len(plan['remove'])}):")
+            for item in plan["remove"]:
+                lines.append(f"  {item['path']}")
 
         if plan.get("play_count_updates"):
-            verb = "to update" if bool(self.test_mode.get()) else "updated"
-            summary_lines.append(f"\nPlay counts {verb} in iTunes ({len(plan['play_count_updates'])}):")
+            lines.append(f"\nPlay counts to update in iTunes ({len(plan['play_count_updates'])}):")
             for item in plan["play_count_updates"]:
-                summary_lines.append(
-                    f"  {item['name']}: {item['itunes_play_count']} + {item['android_play_count']} = {item['new_count']}"
-                )
+                lines.append(f"  {item['name']}: {item['itunes_play_count']} + {item['android_play_count']} = {item['new_count']}")
 
-        self.summary_box.delete("1.0", "end")
-        self.summary_box.insert("1.0", "\n".join(summary_lines))
-        self.status_var.set("Test run complete — review output." if bool(self.test_mode.get()) else "Sync complete.")
+        self._set_output("\n".join(lines))
+        self.status_var.set("Test run complete — review output.")
         self.progress.set(1.0)
+
+    def _run_live_sync(self, plan, serial, selected_playlists):
+        # Build ordered playlist list and per-playlist totals
+        playlist_order = list(dict.fromkeys(
+            item["playlist"] for item in plan.get("copy", [])
+        ))
+        playlist_totals = {}
+        for item in plan.get("copy", []):
+            pl = item["playlist"]
+            playlist_totals[pl] = playlist_totals.get(pl, 0) + 1
+
+        total_files = sum(playlist_totals.values())
+        playlist_progress = {pl: 0 for pl in playlist_order}
+        playlist_done = set()
+
+        header = [
+            f"Mode      : LIVE",
+            f"Playlists : {', '.join(p['name'] for p in selected_playlists)}",
+            f"To copy   : {plan['summary']['copies']}",
+            f"To remove : {plan['summary']['removals']}",
+            "",
+        ]
+
+        def render():
+            pad = max((len(pl) for pl in playlist_order), default=8)
+            lines = list(header) + ["Copying files:"]
+            for pl in playlist_order:
+                done = playlist_progress[pl]
+                total = playlist_totals[pl]
+                status = "  complete" if pl in playlist_done else ""
+                lines.append(f"  {pl:<{pad}}  {done:>4} / {total}{status}")
+            self._set_output("\n".join(lines))
+
+        q = queue.Queue()
+        self._set_run_button_state("disabled")
+        render()
+
+        def on_progress(pl, done, total):
+            q.put(("progress", pl, done, total))
+
+        def worker():
+            result = execute_plan(plan, test_mode=False, serial=serial, progress_callback=on_progress)
+            q.put(("done", result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll():
+            try:
+                while True:
+                    msg = q.get_nowait()
+                    if msg[0] == "progress":
+                        _, pl, done, total = msg
+                        playlist_progress[pl] = done
+                        if done >= total:
+                            playlist_done.add(pl)
+                        render()
+                        self.progress.set(sum(playlist_progress.values()) / max(1, total_files))
+                    elif msg[0] == "done":
+                        _, execution = msg
+                        self._finish_live_sync(plan, execution, playlist_order, playlist_totals)
+                        return
+            except queue.Empty:
+                pass
+            self.root.after(100, poll)
+
+        self.root.after(100, poll)
+
+    def _finish_live_sync(self, plan, execution, playlist_order, playlist_totals):
+        pad = max((len(pl) for pl in playlist_order), default=8)
+        lines = [
+            "Mode      : LIVE",
+            "",
+            "Playlist results:",
+        ]
+        for pl in playlist_order:
+            total = playlist_totals[pl]
+            lines.append(f"  {pl:<{pad}}  {total} / {total}  complete")
+
+        lines += [
+            "",
+            f"Copied  : {execution['copied']}",
+            f"Removed : {execution['removed']}",
+            f"M3U     : {execution['playlists_pushed']} pushed",
+            f"iTunes  : {execution['play_counts_updated']} play counts updated",
+        ]
+
+        if plan.get("remove"):
+            lines.append(f"\nRemoved files ({len(plan['remove'])}):")
+            for item in plan["remove"]:
+                lines.append(f"  {item['path']}")
+
+        if plan.get("play_count_updates"):
+            lines.append(f"\nPlay counts updated in iTunes ({len(plan['play_count_updates'])}):")
+            for item in plan["play_count_updates"]:
+                lines.append(f"  {item['name']}: {item['itunes_play_count']} + {item['android_play_count']} = {item['new_count']}")
+
+        self._set_output("\n".join(lines))
+        self.status_var.set("Sync complete.")
+        self.progress.set(1.0)
+        self._set_run_button_state("normal")
+
+    def _set_output(self, text):
+        self.summary_box.delete("1.0", "end")
+        self.summary_box.insert("1.0", text)
+
+    def _set_run_button_state(self, state):
+        for widget in self.root.winfo_children():
+            self._walk_buttons(widget, "▶  Run sync", state)
+
+    def _walk_buttons(self, widget, label, state):
+        if isinstance(widget, ctk.CTkButton) and widget.cget("text") == label:
+            widget.configure(state=state)
+            return
+        for child in widget.winfo_children():
+            self._walk_buttons(child, label, state)

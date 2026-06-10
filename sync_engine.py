@@ -383,8 +383,12 @@ def _get_isyncr_play_counts(serial, android_root):
             continue
         name = (song.get("songName") or "").lower()
         artist = (song.get("artistName") or "").lower()
-        if name and artist:
-            counts[(name, artist)] = max(counts.get((name, artist), 0), pc)
+        if not name or not artist:
+            continue
+        lp = int(song.get("lastPlayed", "0") or "0")
+        existing = counts.get((name, artist))
+        if existing is None or pc > existing[0]:
+            counts[(name, artist)] = (pc, lp)
     return counts
 
 
@@ -418,24 +422,40 @@ def apply_play_count_updates(updates):
     if not updates or os.name != "nt":
         return 0
 
-    entries = []
+    count_entries = []
+    date_entries = []
     for item in updates:
         ps_path = str(item["source"]).replace("'", "''")
-        entries.append(f"  '{ps_path}' = {item['new_count']}")
+        count_entries.append(f"  '{ps_path}' = {item['new_count']}")
+        lp = item.get("last_played", 0)
+        if lp:
+            date_entries.append(f"  '{ps_path}' = {lp}")
 
-    hashtable = "@{\n" + "\n".join(entries) + "\n}"
+    count_table = "@{\n" + "\n".join(count_entries) + "\n}"
+    date_table = "@{\n" + "\n".join(date_entries) + "\n}" if date_entries else "@{}"
     ps_script = f"""
-$updates = {hashtable}
+$updates = {count_table}
+$lastPlayed = {date_table}
+$epoch = [DateTime]::new(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
 try {{ $iTunes = New-Object -ComObject iTunes.Application }}
 catch {{ Write-Output 0; exit 0 }}
 $tracks = $iTunes.LibraryPlaylist.Tracks
 $n = 0
 for ($i = 1; $i -le $tracks.Count; $i++) {{
     $t = $tracks.Item($i)
+    $changed = $false
     if ($updates.ContainsKey($t.Location) -and $updates[$t.Location] -gt $t.PlayedCount) {{
         $t.PlayedCount = $updates[$t.Location]
-        $n++
+        $changed = $true
     }}
+    if ($lastPlayed.ContainsKey($t.Location) -and $lastPlayed[$t.Location] -gt 0) {{
+        $androidDate = $epoch.AddSeconds($lastPlayed[$t.Location]).ToLocalTime()
+        if ($androidDate -gt $t.PlayedDate) {{
+            $t.PlayedDate = $androidDate
+            $changed = $true
+        }}
+    }}
+    if ($changed) {{ $n++ }}
 }}
 Write-Output $n
 """
@@ -548,11 +568,14 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
         elif destination_exists and (android_play_counts or isyncr_play_counts):
             from_isyncr = False
             android_pc = android_play_counts.get(os.path.basename(source).lower(), 0)
+            last_played = 0
             if android_pc == 0 and isyncr_play_counts:
                 name_key = (_track_value(song, "Name", "name") or "").lower()
                 artist_key = (_track_value(song, "Artist", "artist") or "").lower()
-                android_pc = isyncr_play_counts.get((name_key, artist_key), 0)
-                from_isyncr = True
+                isyncr_entry = isyncr_play_counts.get((name_key, artist_key))
+                if isyncr_entry:
+                    android_pc, last_played = isyncr_entry
+                    from_isyncr = True
             itunes_pc = int(_track_value(song, "Play Count", "play_count") or 0)
             if from_isyncr:
                 new_count = itunes_pc + android_pc
@@ -567,6 +590,7 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
                     "android_play_count": android_pc,
                     "itunes_play_count": itunes_pc,
                     "new_count": new_count,
+                    "last_played": last_played,
                 })
 
     for file_path in android_files:
@@ -632,7 +656,7 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
     }
 
 
-def execute_plan(plan, test_mode=False, serial=None):
+def execute_plan(plan, test_mode=False, serial=None, progress_callback=None):
     copied = 0
     removed = 0
 
@@ -643,9 +667,19 @@ def execute_plan(plan, test_mode=False, serial=None):
             "preview": plan,
         }
 
+    playlist_totals = {}
+    for item in plan.get("copy", []):
+        pl = item.get("playlist", "")
+        playlist_totals[pl] = playlist_totals.get(pl, 0) + 1
+    playlist_copied = {}
+
     for item in plan.get("copy", []):
         if _copy_file(item["source"], item["destination"], serial=serial):
             copied += 1
+            pl = item.get("playlist", "")
+            playlist_copied[pl] = playlist_copied.get(pl, 0) + 1
+            if progress_callback:
+                progress_callback(pl, playlist_copied[pl], playlist_totals[pl])
 
     for item in plan.get("remove", []):
         if _remove_file(item["path"], serial=serial):
