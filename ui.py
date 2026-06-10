@@ -319,10 +319,23 @@ class SyncApp:
     def run_sync(self):
         self.save_config()
 
+        # Re-parse the iTunes library so any changes since the last UI load are picked up
+        itunes_path = self.itunes_entry.get().strip()
+        try:
+            parsed = parse_itunes_library(itunes_path)
+            fresh_playlists = {
+                p["name"]: p
+                for p in parsed.get("playlists", [])
+                if p.get("tracks")
+            }
+        except Exception:
+            fresh_playlists = {}
+
+        selected_names = {name for name, var in self.checkbox_vars.items() if var.get()}
         selected_playlists = [
-            {"name": p["name"], "tracks": p.get("tracks", [])}
-            for p in self.playlists
-            if self.checkbox_vars.get(p["name"], tk.BooleanVar(value=False)).get()
+            {"name": name, "tracks": fresh_playlists[name].get("tracks", [])}
+            for name in selected_names
+            if name in fresh_playlists
         ]
 
         if not selected_playlists:
@@ -376,10 +389,11 @@ class SyncApp:
         for item in plan.get("copy", []):
             if item.get("playlist") in playlist_counts:
                 playlist_counts[item["playlist"]] += 1
-        if any(v for v in playlist_counts.values()):
-            lines.append("\nFiles to copy by playlist:")
-            for name in sorted(playlist_counts):
-                lines.append(f"  {name}: {playlist_counts[name]}")
+        lines.append("\nPlaylist breakdown:")
+        for name in sorted(playlist_counts):
+            count = playlist_counts[name]
+            suffix = f"{count} to copy" if count else "up to date — M3U will refresh"
+            lines.append(f"  {name}: {suffix}")
 
         if plan.get("remove"):
             lines.append(f"\nFiles to remove ({len(plan['remove'])}):")
@@ -396,10 +410,8 @@ class SyncApp:
         self.progress.set(1.0)
 
     def _run_live_sync(self, plan, serial, selected_playlists):
-        # Build ordered playlist list and per-playlist totals
-        playlist_order = list(dict.fromkeys(
-            item["playlist"] for item in plan.get("copy", [])
-        ))
+        # All selected playlists will have their M3U refreshed — use that as the full list
+        playlist_order = [p["name"] for p in plan.get("playlists", [])]
         playlist_totals = {}
         for item in plan.get("copy", []):
             pl = item["playlist"]
@@ -407,7 +419,8 @@ class SyncApp:
 
         total_files = sum(playlist_totals.values())
         playlist_progress = {pl: 0 for pl in playlist_order}
-        playlist_done = set()
+        # Playlists with nothing to copy are immediately complete (M3U-only update)
+        playlist_done = {pl for pl in playlist_order if not playlist_totals.get(pl)}
 
         header = [
             f"Mode      : LIVE",
@@ -419,12 +432,20 @@ class SyncApp:
 
         def render():
             pad = max((len(pl) for pl in playlist_order), default=8)
-            lines = list(header) + ["Copying files:"]
+            lines = list(header) + ["Syncing playlists:"]
             for pl in playlist_order:
-                done = playlist_progress[pl]
-                total = playlist_totals[pl]
-                status = "  complete" if pl in playlist_done else ""
-                lines.append(f"  {pl:<{pad}}  {done:>4} / {total}{status}")
+                done = playlist_progress.get(pl, 0)
+                total = playlist_totals.get(pl, 0)
+                if total == 0:
+                    count_str = "no new files"
+                    status = "  M3U refresh"
+                elif pl in playlist_done:
+                    count_str = f"{done:>4} / {total}"
+                    status = "  complete"
+                else:
+                    count_str = f"{done:>4} / {total}"
+                    status = ""
+                lines.append(f"  {pl:<{pad}}  {count_str}{status}")
             self._set_output("\n".join(lines))
 
         q = queue.Queue()
@@ -469,8 +490,11 @@ class SyncApp:
             "Playlist results:",
         ]
         for pl in playlist_order:
-            total = playlist_totals[pl]
-            lines.append(f"  {pl:<{pad}}  {total} / {total}  complete")
+            total = playlist_totals.get(pl, 0)
+            if total:
+                lines.append(f"  {pl:<{pad}}  {total} / {total}  complete")
+            else:
+                lines.append(f"  {pl:<{pad}}  M3U refreshed")
 
         lines += [
             "",

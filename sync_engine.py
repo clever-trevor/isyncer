@@ -637,6 +637,23 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
                 "content": "\n".join(lines) + "\n",
             })
 
+        # Remove M3U files on the device that no longer correspond to a selected playlist
+        adb = _find_adb()
+        if adb:
+            m3u_cmd = _adb_command(adb, serial) + [
+                "shell", f"find '{android_root}' -maxdepth 1 -name '*.m3u' 2>/dev/null"
+            ]
+            m3u_result = _run_adb_command(m3u_cmd, check=False)
+            if m3u_result and m3u_result.stdout.strip():
+                expected = {p["destination"] for p in playlist_actions}
+                for line in m3u_result.stdout.splitlines():
+                    path = line.strip()
+                    if path and path not in expected:
+                        remove_actions.append({
+                            "name": os.path.splitext(os.path.basename(path))[0],
+                            "path": path,
+                        })
+
     summary = {
         "copies": len(copy_actions),
         "removals": len(remove_actions),
