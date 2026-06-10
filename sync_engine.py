@@ -629,7 +629,14 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
                 artist = _track_value(song, "Artist", "artist") or ""
                 track_name = _track_value(song, "Name", "name") or os.path.basename(source)
                 lines.append(f"#EXTINF:{duration},{artist} - {track_name}")
-                lines.append(android_path)
+                # Use a path relative to the M3U file so /sdcard vs /storage/emulated/0 doesn't matter
+                norm_root = _normalize_android_path(android_root).rstrip("/")
+                norm_path = _normalize_android_path(android_path)
+                if norm_path.startswith(norm_root + "/"):
+                    rel_path = norm_path[len(norm_root) + 1:]
+                else:
+                    rel_path = android_path
+                lines.append(rel_path)
             safe_name = _sanitize_filename(name)
             playlist_actions.append({
                 "name": name,
