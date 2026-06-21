@@ -19,4 +19,4 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
-.venv\Scripts\python.exe main.py
+start .venv\Scripts\pythonw.exe main.py
