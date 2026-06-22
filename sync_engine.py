@@ -736,13 +736,21 @@ def execute_plan(plan, test_mode=False, serial=None, progress_callback=None):
             removed += 1
 
     playlists_pushed = 0
+    playlists_destinations = []
+    debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
+    os.makedirs(debug_dir, exist_ok=True)
     for playlist in plan.get("playlists", []):
         fd, temp_path = tempfile.mkstemp(suffix=".m3u")
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
                 f.write(playlist["content"])
-            if _copy_file(temp_path, playlist["destination"], serial=serial):
+            dest = playlist["destination"]
+            debug_path = os.path.join(debug_dir, os.path.basename(dest))
+            with open(debug_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(playlist["content"])
+            if _copy_file(temp_path, dest, serial=serial):
                 playlists_pushed += 1
+                playlists_destinations.append(dest)
         finally:
             try:
                 os.unlink(temp_path)
@@ -756,10 +764,28 @@ def execute_plan(plan, test_mode=False, serial=None, progress_callback=None):
         _reset_isyncr_xml(serial, android_root)
         _trigger_media_scan(serial, android_root)
 
+    import datetime
+    log_lines = [f"Sync completed: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+    log_lines.append(f"\nM3U files pushed ({playlists_pushed}):")
+    for dest in playlists_destinations:
+        log_lines.append(f"  {dest}")
+    log_lines.append(f"\nFiles copied: {copied}")
+    for item in plan.get("copy", []):
+        log_lines.append(f"  {item['source']}  ->  {item['destination']}")
+    log_lines.append(f"\nFiles removed: {removed}")
+    for item in plan.get("remove", []):
+        log_lines.append(f"  {item['path']}")
+    try:
+        with open(os.path.join(debug_dir, "last_sync.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(log_lines) + "\n")
+    except OSError:
+        pass
+
     return {
         "copied": copied,
         "removed": removed,
         "playlists_pushed": playlists_pushed,
+        "playlists_destinations": playlists_destinations,
         "play_counts_updated": play_counts_updated,
         "preview": plan,
     }

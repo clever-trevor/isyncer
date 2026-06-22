@@ -317,6 +317,8 @@ class SyncApp:
         self.status_var.set("Configuration saved.")
 
     def run_sync(self):
+        self._set_output("Starting sync…")
+        self.root.update_idletasks()
         self.save_config()
 
         # Re-parse the iTunes library so any changes since the last UI load are picked up
@@ -503,6 +505,7 @@ class SyncApp:
             f"M3U     : {execution['playlists_pushed']} pushed",
             f"iTunes  : {execution['play_counts_updated']} play counts updated",
         ]
+
 
         if plan.get("remove"):
             lines.append(f"\nRemoved files ({len(plan['remove'])}):")
