@@ -647,14 +647,16 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
                 if not location:
                     continue
                 source = os.path.abspath(str(location).replace("file://", "").replace("/", "\\"))
-                if not os.path.exists(source):
-                    continue
                 destination = _relative_destination_path(source, android_root)
                 android_path = destination
+                found_on_android = False
                 for key in _android_rel_keys(destination, norm_android_root):
                     if key in android_by_key:
                         android_path = android_by_key[key]
+                        found_on_android = True
                         break
+                if not os.path.exists(source) and not found_on_android:
+                    continue
                 duration = int(_track_value(song, "Total Time", "total_time") or -1000) // 1000
                 artist = _track_value(song, "Artist", "artist") or ""
                 track_name = _track_value(song, "Name", "name") or os.path.basename(source)
