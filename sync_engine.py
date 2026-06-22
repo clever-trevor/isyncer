@@ -84,6 +84,7 @@ def _run_adb_command(command, *, check=False):
         check=check,
         encoding="utf-8",
         errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
 
 
@@ -145,6 +146,7 @@ def _run_powershell(command):
         capture_output=True,
         text=True,
         check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
     return result
 
@@ -656,8 +658,11 @@ def build_sync_plan(selected_playlists, android_root, iTunes_root, test_mode=Fal
                 duration = int(_track_value(song, "Total Time", "total_time") or -1000) // 1000
                 artist = _track_value(song, "Artist", "artist") or ""
                 track_name = _track_value(song, "Name", "name") or os.path.basename(source)
+                norm_ap = android_path.replace("\\", "/")
+                norm_ar = android_root.replace("\\", "/").rstrip("/") + "/"
+                m3u_path = norm_ap[len(norm_ar):] if norm_ap.startswith(norm_ar) else norm_ap
                 lines.append(f"#EXTINF:{duration},{artist} - {track_name}")
-                lines.append(android_path)
+                lines.append(m3u_path)
             safe_name = _sanitize_filename(name)
             playlist_actions.append({
                 "name": name,
